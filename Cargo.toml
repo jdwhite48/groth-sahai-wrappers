@@ -1,0 +1,32 @@
+[package]
+name = "groth-sahai-wrappers"
+version = "0.1.0"
+authors = ["Jacob White <white570@purdue.edu>"]
+edition = "2018"
+license = "MIT OR Apache-2.0"
+description = "Proof wrappers for the Groth-Sahai zero-knowledge proof system"
+repository = "https://github.com/jdwhite88/groth-sahai-wrappers"
+readme = "README.md"
+keywords = ["cryptography", "NIZK", "zero-knowledge", "elliptic curve", "bilinear"]
+categories = ["cryptography"]
+include = ["Cargo.toml", "src", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ark-bls12-381 = { version = "^0.3.0" }
+ark-ec = { version = "^0.3.0", default-features = false }
+ark-ff = { version = "^0.3.0", default-features = false }
+ark-groth16 = { version = "^0.3.0", default-features = false }
+ark-std = { version = "^0.3.0", default-features = false }
+groth-sahai = { git = "https://github.com/jdwhite88/groth-sahai-rs", branch = "main" }
+
+[dev-dependencies]
+criterion = { version = "0.3", features = [ "html_reports" ] } # benchmarks
+
+[profile.release]
+debug = true
+
+[[bench]]
+name = "bench"
+harness = false
