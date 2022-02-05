@@ -42,8 +42,7 @@ cargo bench
 
 ## Supported Wrappers
 
-* **[Groth16](https://github.com/arkworks-rs/groth16/) -- For constructing variants of GS-over-Groth16 proofs, given a `Proof` and other components of the zk-SNARK's circuit [[3]](https://eprint.iacr.org/eprint-bin/getfile.pl?entry=2016/260&version=20160308:201152&file=260.pdf). **(WIP)**
-* Etc...
+* **[Groth16](https://github.com/arkworks-rs/groth16/)** -- For constructing variants of GS-over-Groth16 proofs, given a `Proof` and other components of the zk-SNARK's circuit [[3]](https://eprint.iacr.org/eprint-bin/getfile.pl?entry=2016/260&version=20160308:201152&file=260.pdf).
 
 ## Dependencies
 
@@ -53,7 +52,7 @@ cargo bench
 
 ## Contributing
 
-If you notice a bug, would like to ask a question, or want to propose a new feature, feel free to open an issue!
+If you notice a bug, would like to ask a question, or want to propose a new wrapper, feel free to open an issue!
 
 If you would like to contribute, but have not been invited as a direct collaborator to the project, follow the procedure below (keeping in mind [these instructions](https://docs.github.com/en/issues/tracking-your-work-with-issues/linking-a-pull-request-to-an-issue) if you are attempting to resolve an open issue):
 
