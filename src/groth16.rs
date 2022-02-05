@@ -334,8 +334,8 @@ mod tests {
         blake2s::{constraints::Blake2sGadget, Blake2s},
         PRFGadget, PRF,
     };
-    use ark_ec::{PairingEngine, ProjectiveCurve};
-    use ark_ff::{BigInteger, Field, PrimeField, UniformRand};
+    use ark_ec::PairingEngine;
+    use ark_ff::{BigInteger, Field, PrimeField};
     use ark_groth16::{Proof as Groth16Proof, ProvingKey as Groth16ProvingKey};
     use ark_r1cs_std::{
         alloc::AllocVar, bits::ToBytesGadget, eq::EqGadget, fields::fp::FpVar, uint8::UInt8,
@@ -344,21 +344,22 @@ mod tests {
         ns,
         r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError, ToConstraintField},
     };
-    use ark_std::test_rng;
     use groth_sahai::{AbstractCrs, CRS as GS_CRS};
-
-    //    type G1Affine = <F as PairingEngine>::G1Affine;
-    //    type G2Affine = <F as PairingEngine>::G2Affine;
-    type G1Projective = <F as PairingEngine>::G1Projective;
-    type G2Projective = <F as PairingEngine>::G2Projective;
     type Fr = <F as PairingEngine>::Fr;
 
-    /// This circuit proves knowledge of a field element `k` such that `H(domain_str || k) =
-    /// digest`, where `domain_str` and `digest` are known. `k` is a public input which is intended
-    /// to be hidden by the Groth-Sahai proof.
+    /// Depending on use_ki, this circuit will do one of three things:
+    ///   If use_ki = 1 this circuit proves `H(domain_str, k1) = digest`, where
+    ///     all variables are public input.
+    ///   If use_ki = 2 this circuit proves `H(domain_str, k2) = digest`, where
+    ///     all variables are public input.
+    ///   If use_ki = 3 is set, this circuit proves `H(H(domain_str, k1), k2) = digest`, where
+    ///     all variables are public input.
+    /// Later, we will make `k1` and `k2` hidden by the Groth-Sahai proof.
     #[derive(Clone)]
     struct HashPreimageCircuit<ConstraintF: Field> {
-        k: Option<ConstraintF>,
+        use_ki: usize,
+        k1: ConstraintF,
+        k2: ConstraintF,
         domain_str: [u8; 32],
         digest: [u8; 32],
     }
@@ -370,32 +371,48 @@ mod tests {
             self,
             cs: ConstraintSystemRef<ConstraintF>,
         ) -> Result<(), SynthesisError> {
-            // Get k as PUBLIC input
-            let k = FpVar::<ConstraintF>::new_input(ns!(cs, "preimage"), || {
-                self.k.as_ref().ok_or(SynthesisError::AssignmentMissing)
-            })?;
+            // Get k1,k2 as PUBLIC input
+            let k1 = FpVar::<ConstraintF>::new_input(ns!(cs, "preimage"), || Ok(self.k1))?;
+            let k2 = FpVar::<ConstraintF>::new_input(ns!(cs, "preimage"), || Ok(self.k2))?;
 
             // Get the domain str and hash as well
             let domain_str: Vec<UInt8<ConstraintF>> =
                 UInt8::new_input_vec(ns!(cs, "domain_str"), &self.domain_str)?;
             let expected_digest = UInt8::new_input_vec(ns!(cs, "digest"), &self.digest)?;
 
-            // Compute the digest and ensure it equals the expected digest
-            let computed_digest = Blake2sGadget::evaluate(&domain_str, &k.to_bytes()?)?;
+            let computed_digest = match self.use_ki {
+                1 => {
+                    // Compute `H(domain_str, k1)`
+                    Blake2sGadget::evaluate(&domain_str, &k1.to_bytes()?)?
+                }
+                2 => {
+                    // Compute `H(domain_str, k2)`
+                    Blake2sGadget::evaluate(&domain_str, &k2.to_bytes()?)?
+                }
+                3 => {
+                    // Compute `H(H(domain_str, k1), k2)`
+                    let inner_digest = Blake2sGadget::evaluate(&domain_str, &k1.to_bytes()?)?;
+                    Blake2sGadget::evaluate(&inner_digest.0, &k2.to_bytes()?)?
+                }
+                _ => panic!("use_ki must be 1, 2, or 3"),
+            };
+            // Enforce that the provided digest equals the computed one
             expected_digest.enforce_equal(&computed_digest.0)
         }
     }
 
     impl<ConstraintF: PrimeField> HashPreimageCircuit<ConstraintF> {
-        /// Generates a proving key for this circuit
-        fn gen_crs<E, R>(rng: &mut R) -> Groth16ProvingKey<E>
+        /// Generates a proving key for this circuit for a specific choice of use_ki
+        fn gen_crs<E, R>(rng: &mut R, use_ki: usize) -> Groth16ProvingKey<E>
         where
             E: PairingEngine<Fr = ConstraintF>,
             R: Rng,
         {
             let placeholder_bytes = *b"XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
             let placeholder_circuit = HashPreimageCircuit {
-                k: None,
+                use_ki,
+                k1: E::Fr::zero(),
+                k2: E::Fr::zero(),
                 domain_str: placeholder_bytes,
                 digest: placeholder_bytes,
             };
@@ -407,7 +424,9 @@ mod tests {
         fn prove<E, R>(
             rng: &mut R,
             pk: &Groth16ProvingKey<E>,
-            k: E::Fr,
+            use_ki: usize,
+            k1: E::Fr,
+            k2: E::Fr,
             domain_str: [u8; 32],
         ) -> (Vec<ConstraintF>, Groth16Proof<E>)
         where
@@ -415,15 +434,34 @@ mod tests {
             R: Rng,
         {
             // Compute the digest we need to prove
-            let digest = {
-                let mut k_bytes = [0u8; 32];
-                k_bytes.copy_from_slice(&k.into_repr().to_bytes_le());
-                Blake2s::evaluate(&domain_str, &k_bytes).unwrap()
+            let mut k1_bytes = [0u8; 32];
+            let mut k2_bytes = [0u8; 32];
+            k1_bytes.copy_from_slice(&k1.into_repr().to_bytes_le());
+            k2_bytes.copy_from_slice(&k2.into_repr().to_bytes_le());
+            let digest = match use_ki {
+                1 => {
+                    // H(domain_str, k1)
+                    Blake2s::evaluate(&domain_str, &k1_bytes).unwrap()
+                }
+                2 => {
+                    // H(domain_str, k2)
+                    Blake2s::evaluate(&domain_str, &k2_bytes).unwrap()
+                }
+                3 => {
+                    // H(H(domain_str, k1), k2)
+                    let inner_digest = Blake2s::evaluate(&domain_str, &k1_bytes).unwrap();
+                    Blake2s::evaluate(&inner_digest, &k2_bytes).unwrap()
+                }
+                _ => {
+                    panic!("use_ki must be 1, 2, or 3");
+                }
             };
 
             // Make the circuit and prove it
             let circuit = HashPreimageCircuit {
-                k: Some(k),
+                use_ki,
+                k1,
+                k2,
                 domain_str,
                 digest,
             };
@@ -431,7 +469,8 @@ mod tests {
 
             // Serialize all the public inputs
             let public_inputs = [
-                k.to_field_elements().unwrap(),
+                k1.to_field_elements().unwrap(),
+                k2.to_field_elements().unwrap(),
                 domain_str.to_field_elements().unwrap(),
                 digest.to_field_elements().unwrap(),
             ]
@@ -444,341 +483,128 @@ mod tests {
     /// We test the preimage circuit here
     #[test]
     fn test_preimage_circuit_correctness() {
-        let mut rng = rand::thread_rng();
+        let mut rng = ark_std::test_rng();
 
-        // Set the parameters of this circuit
+        // Set the parameters of this circuit. Do the full double-hash, i.e., use_ki = 3
+        let use_ki = 3;
         let domain_str = *b"goodbye my coney island babyyyyy";
-        let k = Fr::from(1337u32);
+        let k1 = Fr::from(1337u32);
+        let k2 = Fr::from(0xdeadbeefu32);
 
         // Generate the CRS and then prove on the above parameters
-        let pk = HashPreimageCircuit::gen_crs::<F, _>(&mut rng);
-        let (public_inputs, proof) = HashPreimageCircuit::prove(&mut rng, &pk, k, domain_str);
+        let pk = HashPreimageCircuit::gen_crs::<F, _>(&mut rng, use_ki);
+        let (public_inputs, proof) =
+            HashPreimageCircuit::prove(&mut rng, &pk, use_ki, k1, k2, domain_str);
 
         // Now verify the proof
         let pvk = ark_groth16::prepare_verifying_key(&pk.vk);
         assert!(ark_groth16::verify_proof(&pvk, &proof, &public_inputs).unwrap());
     }
 
-    /// In this test we prove that `H(domain_str1 || k) = digest1` and `H(domain_str2 || k) =
-    /// digest2` for some hidden `k`. That is, we show that `digest1` and `digest2` share the same
-    /// `k` input.
+    /// In this test we make three circuits. One computes `H(domain_str1, k1)`. One computes
+    /// `H(H(domain_str2, k1), k2)`. One computes `H(domain_str1, k2)`. We then prove that all of
+    /// these circuits share the same `k1,k2`.
     #[test]
     fn test_preimage_circuit_linkage() {
-        let mut rng = rand::thread_rng();
+        let mut rng = ark_std::test_rng();
 
         // Set the parameters of this circuit
-        let k = Fr::from(1337u32);
+        let k1 = Fr::from(1337u32);
+        let k2 = Fr::from(0xdeadbeefu32);
         let domain_str1 = *b"goodbye my coney island babyyyyy";
         let domain_str2 = *b"goodbye my one true loveeeeeeeee";
 
-        // Generate the CRS and then prove on the above parameters
-        let pk = HashPreimageCircuit::gen_crs::<F, _>(&mut rng);
-        let (mut public_inputs1, proof1) =
-            HashPreimageCircuit::prove(&mut rng, &pk, k, domain_str1);
-        let (mut public_inputs2, proof2) =
-            HashPreimageCircuit::prove(&mut rng, &pk, k, domain_str2);
+        // Generate the CRSs and then prove on the above parameters. single1 is the circuit that
+        // computes `H(domain_str1, k1)`. single2 computes `H(domain_str1, k2)`. double computes
+        // `H(H(domain_str2, k1), k2)`.
+        let pk_single1 = HashPreimageCircuit::gen_crs::<F, _>(&mut rng, 1);
+        let pk_single2 = HashPreimageCircuit::gen_crs::<F, _>(&mut rng, 2);
+        let pk_double = HashPreimageCircuit::gen_crs::<F, _>(&mut rng, 3);
+        let (mut public_inputs_single1, proof_single1) =
+            HashPreimageCircuit::prove(&mut rng, &pk_single1, 1, k1, k2, domain_str1);
+        let (mut public_inputs_single2, proof_single2) =
+            HashPreimageCircuit::prove(&mut rng, &pk_single2, 2, k1, k2, domain_str1);
+        let (mut public_inputs_double, proof_double) =
+            HashPreimageCircuit::prove(&mut rng, &pk_double, 3, k1, k2, domain_str2);
 
         // Verify the proofs
-        let pvk = ark_groth16::prepare_verifying_key(&pk.vk);
-        assert!(ark_groth16::verify_proof(&pvk, &proof1, &public_inputs1).unwrap());
-        assert!(ark_groth16::verify_proof(&pvk, &proof2, &public_inputs2).unwrap());
+        let pvk_single1 = ark_groth16::prepare_verifying_key(&pk_single1.vk);
+        let pvk_single2 = ark_groth16::prepare_verifying_key(&pk_single2.vk);
+        let pvk_double = ark_groth16::prepare_verifying_key(&pk_double.vk);
+        assert!(
+            ark_groth16::verify_proof(&pvk_single1, &proof_single1, &public_inputs_single1)
+                .unwrap()
+        );
+        assert!(
+            ark_groth16::verify_proof(&pvk_single2, &proof_single2, &public_inputs_single2)
+                .unwrap()
+        );
+        assert!(
+            ark_groth16::verify_proof(&pvk_double, &proof_double, &public_inputs_double).unwrap()
+        );
 
-        // Now do a GS-over-canon-Groth16 and verify that. This does not hide k
+        // Now do a GS-over-canon-Groth16 and verify that. This does not hide k1 or k2
         let crs = GS_CRS::<F>::generate_crs(&mut rng);
-        let prepared_input1 = ark_groth16::prepare_inputs(&pvk, &public_inputs1).unwrap();
-        let prepared_input2 = ark_groth16::prepare_inputs(&pvk, &public_inputs2).unwrap();
+        let prepared_input_single1 =
+            ark_groth16::prepare_inputs(&pvk_single1, &public_inputs_single1).unwrap();
+        let prepared_input_single2 =
+            ark_groth16::prepare_inputs(&pvk_single2, &public_inputs_single2).unwrap();
+        let prepared_input_double =
+            ark_groth16::prepare_inputs(&pvk_double, &public_inputs_double).unwrap();
         let (xcoms, ycoms, gs_proofs) = prove_canon_g16_equations(
             &[
-                (&proof1, &pk.vk, &prepared_input1),
-                (&proof2, &pk.vk, &prepared_input2),
+                (&proof_single1, &pk_single1.vk, &prepared_input_single1),
+                (&proof_single2, &pk_single2.vk, &prepared_input_single2),
+                (&proof_double, &pk_double.vk, &prepared_input_double),
             ],
             &crs,
             &mut rng,
         );
         assert!(verify_canon_g16_equations::<F>(
-            &[(&pk.vk, &prepared_input1), (&pk.vk, &prepared_input2)],
+            &[
+                (&pk_single1.vk, &prepared_input_single1),
+                (&pk_single2.vk, &prepared_input_single2),
+                (&pk_double.vk, &prepared_input_double)
+            ],
             (&xcoms, &ycoms, &gs_proofs),
             &crs
         ));
 
-        // Now link the proofs along the hidden `k`. Prepare the inputs excluding `k`. We exclude
-        // `k` by setting it to 0 (this works because input preparation is just Σ aᵢWᵢ where aᵢ are
-        // the inputs and Wᵢ are the group elements representing input wires)
-        public_inputs1[0] = Fr::zero();
-        public_inputs2[0] = Fr::zero();
-        let prepared_input1 = ark_groth16::prepare_inputs(&pvk, &public_inputs1).unwrap();
-        let prepared_input2 = ark_groth16::prepare_inputs(&pvk, &public_inputs2).unwrap();
+        // Now link the proofs along the hidden `k1,k2`. Prepare the inputs excluding `k1,k2`. We
+        // exclude `k1,k2` by setting them to 0 (this works because input preparation is just Σ
+        // aᵢWᵢ where aᵢ are the inputs and Wᵢ are the group elements representing input wires)
+        public_inputs_single1[0] = Fr::zero();
+        public_inputs_single1[1] = Fr::zero();
+        public_inputs_single2[0] = Fr::zero();
+        public_inputs_single2[1] = Fr::zero();
+        public_inputs_double[0] = Fr::zero();
+        public_inputs_double[1] = Fr::zero();
+        let prepared_input_single1 =
+            ark_groth16::prepare_inputs(&pvk_single1, &public_inputs_single1).unwrap();
+        let prepared_input_single2 =
+            ark_groth16::prepare_inputs(&pvk_single2, &public_inputs_single2).unwrap();
+        let prepared_input_double =
+            ark_groth16::prepare_inputs(&pvk_double, &public_inputs_double).unwrap();
 
-        // Do a linking G-S proof along k
+        // Do a linking G-S proof along k1, k2
         let crs = GS_CRS::<F>::generate_crs(&mut rng);
         let (xcoms, ycoms, gs_proofs) = prove_linked_g16_equations(
             &[
-                (&proof1, &pk.vk, &prepared_input1),
-                (&proof2, &pk.vk, &prepared_input2),
+                (&proof_single1, &pk_single1.vk, &prepared_input_single1),
+                (&proof_single2, &pk_single2.vk, &prepared_input_single2),
+                (&proof_double, &pk_double.vk, &prepared_input_double),
             ],
-            &[k],
+            &[k1, k2],
             &crs,
             &mut rng,
         );
 
         // Verify the linked proof
         assert!(verify_linked_g16_equations::<F>(
-            &[(&pk.vk, &prepared_input1), (&pk.vk, &prepared_input2)],
-            (&xcoms, &ycoms, &gs_proofs),
-            &crs
-        ));
-    }
-
-    #[test]
-    // Tests well-formedness of Groth-Sahai representations of Groth16 equation structure ONLY. NOT an
-    // end-to-end test with real Groth16 elements (TODO: complement or replace this with a proper Groth16 test)
-    fn test_mock_gs_over_groth16_verification() {
-        let mut rng = test_rng();
-        let crs = GS_CRS::<F>::generate_crs(&mut rng);
-
-        // NOTE: This is a mock Groth16 setup to make the underlying equation trivially satisfiable.
-        let mock_beta_g2 = G2Projective::rand(&mut rng).into_affine();
-        let mock_g16_vk: VerifyingKey<F> = VerifyingKey::<F> {
-            alpha_g1: G1Projective::rand(&mut rng).into_affine(),
-            beta_g2: mock_beta_g2,
-            gamma_g2: G2Projective::rand(&mut rng).into_affine(),
-            delta_g2: -mock_beta_g2,
-            gamma_abc_g1: vec![
-                G1Projective::rand(&mut rng).into_affine(),
-                G1Projective::rand(&mut rng).into_affine(),
-                G1Projective::rand(&mut rng).into_affine(),
-            ],
-        };
-        let mock_prepared_public_input = G1Projective::rand(&mut rng);
-        let mock_g16_pf: Proof<F> = Proof::<F> {
-            a: mock_prepared_public_input.into_affine(),
-            b: mock_g16_vk.gamma_g2,
-            c: mock_g16_vk.alpha_g1,
-        };
-        let (xcoms, ycoms, gs_proofs) = prove_canon_g16_equations(
-            &[(&mock_g16_pf, &mock_g16_vk, &mock_prepared_public_input)],
-            &crs,
-            &mut rng,
-        );
-        assert!(verify_canon_g16_equations::<F>(
-            &[(&mock_g16_vk, &mock_prepared_public_input)],
-            (&xcoms, &ycoms, &gs_proofs),
-            &crs
-        ));
-    }
-
-    #[test]
-    // Tests well-formedness of GS representations of multiple Groth16 equations ONLY. NOT an
-    // end-to-end test with real Groth16 elements (TODO: complement or replace this with a proper Groth16 test)
-    fn test_mock_gs_over_groth16_multi_verification() {
-        let mut rng = test_rng();
-        let crs = GS_CRS::<F>::generate_crs(&mut rng);
-
-        // NOTE: This is a mock Groth16 setup to make the underlying equation trivially satisfiable.
-        let mock_beta_g2_vk1 = G2Projective::rand(&mut rng).into_affine();
-        let mock_beta_g2_vk2 = G2Projective::rand(&mut rng).into_affine();
-        let mock_beta_g2_vk3 = G2Projective::rand(&mut rng).into_affine();
-        let mock_g16_vk1: VerifyingKey<F> = VerifyingKey::<F> {
-            alpha_g1: G1Projective::rand(&mut rng).into_affine(),
-            beta_g2: mock_beta_g2_vk1,
-            gamma_g2: G2Projective::rand(&mut rng).into_affine(),
-            delta_g2: -mock_beta_g2_vk1,
-            gamma_abc_g1: vec![
-                G1Projective::rand(&mut rng).into_affine(),
-                G1Projective::rand(&mut rng).into_affine(),
-                G1Projective::rand(&mut rng).into_affine(),
-                G1Projective::rand(&mut rng).into_affine(),
-            ],
-        };
-        let mock_g16_vk2: VerifyingKey<F> = VerifyingKey::<F> {
-            alpha_g1: G1Projective::rand(&mut rng).into_affine(),
-            beta_g2: mock_beta_g2_vk2,
-            gamma_g2: G2Projective::rand(&mut rng).into_affine(),
-            delta_g2: -mock_beta_g2_vk2,
-            gamma_abc_g1: vec![
-                G1Projective::rand(&mut rng).into_affine(),
-                G1Projective::rand(&mut rng).into_affine(),
-                G1Projective::rand(&mut rng).into_affine(),
-                G1Projective::rand(&mut rng).into_affine(),
-            ],
-        };
-        let mock_g16_vk3: VerifyingKey<F> = VerifyingKey::<F> {
-            alpha_g1: G1Projective::rand(&mut rng).into_affine(),
-            beta_g2: mock_beta_g2_vk3,
-            gamma_g2: G2Projective::rand(&mut rng).into_affine(),
-            delta_g2: -mock_beta_g2_vk3,
-            gamma_abc_g1: vec![
-                G1Projective::rand(&mut rng).into_affine(),
-                G1Projective::rand(&mut rng).into_affine(),
-                G1Projective::rand(&mut rng).into_affine(),
-                G1Projective::rand(&mut rng).into_affine(),
-            ],
-        };
-        let mock_prepared_public_input1 = G1Projective::rand(&mut rng);
-        let mock_prepared_public_input2 = G1Projective::rand(&mut rng);
-        let mock_prepared_public_input3 = G1Projective::rand(&mut rng);
-        let mock_g16_pf1: Proof<F> = Proof::<F> {
-            a: mock_prepared_public_input1.into_affine(),
-            b: mock_g16_vk1.gamma_g2,
-            c: mock_g16_vk1.alpha_g1,
-        };
-        let mock_g16_pf2: Proof<F> = Proof::<F> {
-            a: mock_prepared_public_input2.into_affine(),
-            b: mock_g16_vk2.gamma_g2,
-            c: mock_g16_vk2.alpha_g1,
-        };
-        let mock_g16_pf3: Proof<F> = Proof::<F> {
-            a: mock_prepared_public_input3.into_affine(),
-            b: mock_g16_vk3.gamma_g2,
-            c: mock_g16_vk3.alpha_g1,
-        };
-        let (xcoms, ycoms, gs_proofs) = prove_canon_g16_equations(
             &[
-                (&mock_g16_pf1, &mock_g16_vk1, &mock_prepared_public_input1),
-                (&mock_g16_pf2, &mock_g16_vk2, &mock_prepared_public_input2),
-                (&mock_g16_pf3, &mock_g16_vk3, &mock_prepared_public_input3),
-            ],
-            &crs,
-            &mut rng,
-        );
-        assert!(verify_canon_g16_equations::<F>(
-            &[
-                (&mock_g16_vk1, &mock_prepared_public_input1),
-                (&mock_g16_vk2, &mock_prepared_public_input2),
-                (&mock_g16_vk3, &mock_prepared_public_input3)
-            ],
-            (&xcoms, &ycoms, &gs_proofs),
-            &crs
-        ));
-    }
-
-    #[test]
-    // Tests well-formedness of Groth-Sahai representations of linked Groth16 equation structure ONLY. NOT an
-    // end-to-end test with real Groth16 elements (TODO: complement or replace this with a proper Groth16 test)
-    fn test_mock_gs_over_linked_groth16_verification() {
-        let mut rng = test_rng();
-        let crs = GS_CRS::<F>::generate_crs(&mut rng);
-
-        // NOTE: This is a mock Groth16 setup to make the underlying equation trivially satisfiable.
-        let mock_beta_g2 = G2Projective::rand(&mut rng).into_affine();
-        let mock_w0 = G1Projective::rand(&mut rng).into_affine();
-
-        let mock_g16_vk: VerifyingKey<F> = VerifyingKey::<F> {
-            alpha_g1: G1Projective::rand(&mut rng).into_affine(),
-            beta_g2: mock_beta_g2,
-            gamma_g2: G2Projective::rand(&mut rng).into_affine(),
-            delta_g2: -mock_beta_g2,
-            gamma_abc_g1: vec![
-                G1Projective::rand(&mut rng).into_affine(),
-                mock_w0,
-                mock_w0,
-                G1Projective::rand(&mut rng).into_affine(),
-            ],
-        };
-        let mock_prepared_public_input = G1Projective::rand(&mut rng);
-        let mock_g16_pf: Proof<F> = Proof::<F> {
-            a: mock_prepared_public_input.into_affine(),
-            b: mock_g16_vk.gamma_g2,
-            c: mock_g16_vk.alpha_g1,
-        };
-        let mock_a0 = Fr::rand(&mut rng);
-        let (xcoms, ycoms, gs_proofs) = prove_linked_g16_equations(
-            &[(&mock_g16_pf, &mock_g16_vk, &mock_prepared_public_input)],
-            &[mock_a0, -mock_a0],
-            &crs,
-            &mut rng,
-        );
-        assert!(verify_linked_g16_equations::<F>(
-            &[(&mock_g16_vk, &mock_prepared_public_input)],
-            (&xcoms, &ycoms, &gs_proofs),
-            &crs
-        ));
-    }
-
-    #[test]
-    // Tests well-formedness of Groth-Sahai representations of multiple linked Groth16 equation structure ONLY. NOT an
-    // end-to-end test with real Groth16 elements (TODO: complement or replace this with a proper Groth16 test)
-    fn test_mock_gs_over_linked_groth16_multi_verification() {
-        let mut rng = test_rng();
-        let crs = GS_CRS::<F>::generate_crs(&mut rng);
-
-        // NOTE: This is a mock Groth16 setup to make the underlying equation trivially satisfiable.
-        let mock_beta_g2_vk1 = G2Projective::rand(&mut rng).into_affine();
-        let mock_beta_g2_vk2 = G2Projective::rand(&mut rng).into_affine();
-        let mock_beta_g2_vk3 = G2Projective::rand(&mut rng).into_affine();
-        let mock_w0 = G1Projective::rand(&mut rng).into_affine();
-
-        let mock_g16_vk1: VerifyingKey<F> = VerifyingKey::<F> {
-            alpha_g1: G1Projective::rand(&mut rng).into_affine(),
-            beta_g2: mock_beta_g2_vk1,
-            gamma_g2: G2Projective::rand(&mut rng).into_affine(),
-            delta_g2: -mock_beta_g2_vk1,
-            gamma_abc_g1: vec![
-                G1Projective::rand(&mut rng).into_affine(),
-                mock_w0,
-                mock_w0,
-                G1Projective::rand(&mut rng).into_affine(),
-            ],
-        };
-        let mock_g16_vk2: VerifyingKey<F> = VerifyingKey::<F> {
-            alpha_g1: G1Projective::rand(&mut rng).into_affine(),
-            beta_g2: mock_beta_g2_vk2,
-            gamma_g2: G2Projective::rand(&mut rng).into_affine(),
-            delta_g2: -mock_beta_g2_vk2,
-            gamma_abc_g1: vec![
-                G1Projective::rand(&mut rng).into_affine(),
-                mock_w0,
-                mock_w0,
-                G1Projective::rand(&mut rng).into_affine(),
-            ],
-        };
-        let mock_g16_vk3: VerifyingKey<F> = VerifyingKey::<F> {
-            alpha_g1: G1Projective::rand(&mut rng).into_affine(),
-            beta_g2: mock_beta_g2_vk3,
-            gamma_g2: G2Projective::rand(&mut rng).into_affine(),
-            delta_g2: -mock_beta_g2_vk3,
-            gamma_abc_g1: vec![
-                G1Projective::rand(&mut rng).into_affine(),
-                mock_w0,
-                mock_w0,
-                G1Projective::rand(&mut rng).into_affine(),
-            ],
-        };
-        let mock_prepared_public_input1 = G1Projective::rand(&mut rng);
-        let mock_prepared_public_input2 = G1Projective::rand(&mut rng);
-        let mock_prepared_public_input3 = G1Projective::rand(&mut rng);
-        let mock_g16_pf1: Proof<F> = Proof::<F> {
-            a: mock_prepared_public_input1.into_affine(),
-            b: mock_g16_vk1.gamma_g2,
-            c: mock_g16_vk1.alpha_g1,
-        };
-        let mock_g16_pf2: Proof<F> = Proof::<F> {
-            a: mock_prepared_public_input2.into_affine(),
-            b: mock_g16_vk2.gamma_g2,
-            c: mock_g16_vk2.alpha_g1,
-        };
-        let mock_g16_pf3: Proof<F> = Proof::<F> {
-            a: mock_prepared_public_input3.into_affine(),
-            b: mock_g16_vk3.gamma_g2,
-            c: mock_g16_vk3.alpha_g1,
-        };
-
-        let mock_a0 = Fr::rand(&mut rng);
-        let (xcoms, ycoms, gs_proofs) = prove_linked_g16_equations(
-            &[
-                (&mock_g16_pf1, &mock_g16_vk1, &mock_prepared_public_input1),
-                (&mock_g16_pf2, &mock_g16_vk2, &mock_prepared_public_input2),
-                (&mock_g16_pf3, &mock_g16_vk3, &mock_prepared_public_input3),
-            ],
-            &[mock_a0, -mock_a0],
-            &crs,
-            &mut rng,
-        );
-        assert!(verify_linked_g16_equations::<F>(
-            &[
-                (&mock_g16_vk1, &mock_prepared_public_input1),
-                (&mock_g16_vk2, &mock_prepared_public_input2),
-                (&mock_g16_vk3, &mock_prepared_public_input3)
+                (&pk_single1.vk, &prepared_input_single1),
+                (&pk_single2.vk, &prepared_input_single2),
+                (&pk_double.vk, &prepared_input_double)
             ],
             (&xcoms, &ycoms, &gs_proofs),
             &crs
