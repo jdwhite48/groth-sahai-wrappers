@@ -4,9 +4,11 @@
 //! See [groth_sahai::generator](https://github.com/jdwhite88/groth-sahai-rs/blob/main/src/generator.rs) for more details.
 
 use ark_ec::{AffineCurve, PairingEngine, ProjectiveCurve};
-use ark_ff::{One, Zero};
+use ark_ff::{One, Zero, PrimeField};
 use ark_groth16::{Proof, VerifyingKey};
 use ark_std::rand::{CryptoRng, Rng};
+
+use core::ops::AddAssign;
 
 use groth_sahai::prover::{batch_commit_G1, batch_commit_G2, Commit1, Commit2, EquProof, Provable};
 use groth_sahai::statement::PPE;
@@ -19,7 +21,7 @@ use groth_sahai::{Matrix, CRS as GS_CRS};
 /// The G1 element, `prepared_pub_input`, is expected to be `Σ_{i=0}^{\ell [p]} a_p,i W_p,i`
 /// where `W_p,i` corresponds to the `p`th `VerifyingKey`'s `gamma_abc_g1[i]`.
 pub fn prove_canon_g16_equations<R, E>(
-    g16_pf_elems: &[(&Proof<E>, &VerifyingKey<E>, &E::G1Affine)],
+    g16_pf_elems: &[(&Proof<E>, &VerifyingKey<E>, &E::G1Projective)],
     gs_crs: &GS_CRS<E>,
     rng: &mut R,
 ) -> (Commit1<E>, Commit2<E>, Vec<EquProof<E>>)
@@ -70,7 +72,7 @@ where
 /// where `W_p,i` corresponds to the `p`th `VerifyingKey`'s `gamma_abc_g1[i]` and the `k` linked
 /// inputs `a_0, a_1, ..., a_{k-1}` are provided as input.
 pub fn prove_linked_g16_equations<R, E>(
-    g16_pf_elems: &[(&Proof<E>, &VerifyingKey<E>, &E::G1Affine)],
+    g16_pf_elems: &[(&Proof<E>, &VerifyingKey<E>, &E::G1Projective)],
     g16_linked_inputs: &[E::Fr],
     gs_crs: &GS_CRS<E>,
     rng: &mut R,
@@ -94,14 +96,14 @@ where
     let m = 3 * num_equ;
     let mut xvars: Vec<E::G1Affine> = Vec::with_capacity(m);
     for (pf, vk, _) in g16_pf_elems.iter() {
-        assert!(g16_linked_inputs.len() <= vk.gamma_abc_g1.len());
+        assert!(g16_linked_inputs.len() + 1 <= vk.gamma_abc_g1.len());
 
-        // Compute sum from i=0 to k-1 of a_p,i W_p,i
-        let mut s_link_var = E::G1Affine::zero();
+        // Compute sum from i=0 to k-1 of a_p,i W_p,i (skipping first element in vk)
+        let mut s_link_var = E::G1Projective::zero();
         for (i, ai) in g16_linked_inputs.iter().enumerate() {
-            s_link_var = s_link_var + vk.gamma_abc_g1[i].mul(*ai).into_affine();
+            s_link_var.add_assign(&vk.gamma_abc_g1[i+1].mul(ai.into_repr()));
         }
-        xvars.append(&mut vec![pf.a, pf.c, s_link_var]);
+        xvars.append(&mut vec![pf.a, pf.c, s_link_var.into_affine()]);
     }
     // Y = [ ..., B_p, ... ]
     let yvars: Vec<E::G2Affine> = g16_pf_elems.iter().map(|(pf, _, _)| pf.b).collect();
@@ -126,7 +128,7 @@ where
 /// where `W_p,i` corresponds to the `p`th `VerifyingKey`'s `gamma_abc_g1[i]`.
 #[must_use]
 pub fn verify_canon_g16_equations<E: PairingEngine>(
-    g16_ver_elems: &[(&VerifyingKey<E>, &E::G1Affine)],
+    g16_ver_elems: &[(&VerifyingKey<E>, &E::G1Projective)],
     gs_proofs: (&Commit1<E>, &Commit2<E>, &Vec<EquProof<E>>),
     gs_crs: &GS_CRS<E>,
 ) -> bool {
@@ -162,7 +164,7 @@ pub fn verify_canon_g16_equations<E: PairingEngine>(
 /// where `W_p,i` corresponds to the `p`th `VerifyingKey`'s `gamma_abc_g1[i]`.
 #[must_use]
 pub fn verify_linked_g16_equations<E: PairingEngine>(
-    g16_ver_elems: &[(&VerifyingKey<E>, &E::G1Affine)],
+    g16_ver_elems: &[(&VerifyingKey<E>, &E::G1Projective)],
     gs_proofs: (&Commit1<E>, &Commit2<E>, &Vec<EquProof<E>>),
     gs_crs: &GS_CRS<E>,
 ) -> bool {
@@ -199,7 +201,7 @@ pub fn verify_linked_g16_equations<E: PairingEngine>(
 /// The G1 element, `prepared_pub_input`, is expected to be `Σ_{i=0}^{\ell [p]} a_p,i W_p,i`
 /// where `W_p,i` corresponds to the `p`th `VerifyingKey`'s `gamma_abc_g1[i]`.
 pub fn prepare_canon_g16_equations<E: PairingEngine>(
-    g16_elems: &[(&VerifyingKey<E>, &E::G1Affine)],
+    g16_elems: &[(&VerifyingKey<E>, &E::G1Projective)],
 ) -> Vec<PPE<E>> {
     let num_equ = g16_elems.len();
     // The number of G1 variables: A, C in `Proof`
@@ -240,7 +242,7 @@ pub fn prepare_canon_g16_equations<E: PairingEngine>(
         gs_b_consts[2 * p + 1] = -vk.delta_g2;
 
         let gs_rhs: E::Fqk = E::pairing::<E::G1Affine, E::G2Affine>(vk.alpha_g1, vk.beta_g2)
-            * E::pairing::<E::G1Affine, E::G2Affine>(**pub_input, vk.gamma_g2);
+            * E::pairing::<E::G1Affine, E::G2Affine>(pub_input.into_affine(), vk.gamma_g2);
 
         // Add the `p`th Groth16 verification equation to the list of Groth-Sahai equations
         gs_equs.push(PPE::<E> {
@@ -264,7 +266,7 @@ pub fn prepare_canon_g16_equations<E: PairingEngine>(
 /// Furthermore, `prepared_pub_input` is expected to incorporate the remaining Groth16 (canonically) public inputs as
 /// `Σ_{i=k}^{\ell [p]} a_p,i W_p,i`, where `W_p,i` corresponds to the `p`th `VerifyingKey`'s `gamma_abc_g1[i]` in both.
 pub fn prepare_linked_g16_equations<E: PairingEngine>(
-    g16_elems: &[(&VerifyingKey<E>, &E::G1Affine)],
+    g16_elems: &[(&VerifyingKey<E>, &E::G1Projective)],
 ) -> Vec<PPE<E>> {
     let num_equ = g16_elems.len();
     // The number of G1 variables: A, C, S in `Proof`
@@ -309,7 +311,7 @@ pub fn prepare_linked_g16_equations<E: PairingEngine>(
         gs_b_consts[3 * p + 2] = -vk.gamma_g2;
 
         let gs_rhs: E::Fqk = E::pairing::<E::G1Affine, E::G2Affine>(vk.alpha_g1, vk.beta_g2)
-            * E::pairing::<E::G1Affine, E::G2Affine>(**pub_input, vk.gamma_g2);
+            * E::pairing::<E::G1Affine, E::G2Affine>(pub_input.into_affine(), vk.gamma_g2);
 
         // Add the `p`th Groth16 verification equation to the list of Groth-Sahai equations
         gs_equs.push(PPE::<E> {
@@ -533,9 +535,9 @@ mod tests {
                 G1Projective::rand(&mut rng).into_affine(),
             ],
         };
-        let mock_prepared_public_input = G1Projective::rand(&mut rng).into_affine();
+        let mock_prepared_public_input = G1Projective::rand(&mut rng);
         let mock_g16_pf: Proof<F> = Proof::<F> {
-            a: mock_prepared_public_input,
+            a: mock_prepared_public_input.into_affine(),
             b: mock_g16_vk.gamma_g2,
             c: mock_g16_vk.alpha_g1,
         };
@@ -571,6 +573,7 @@ mod tests {
                 G1Projective::rand(&mut rng).into_affine(),
                 G1Projective::rand(&mut rng).into_affine(),
                 G1Projective::rand(&mut rng).into_affine(),
+                G1Projective::rand(&mut rng).into_affine(),
             ],
         };
         let mock_g16_vk2: VerifyingKey<F> = VerifyingKey::<F> {
@@ -579,6 +582,7 @@ mod tests {
             gamma_g2: G2Projective::rand(&mut rng).into_affine(),
             delta_g2: -mock_beta_g2_vk2,
             gamma_abc_g1: vec![
+                G1Projective::rand(&mut rng).into_affine(),
                 G1Projective::rand(&mut rng).into_affine(),
                 G1Projective::rand(&mut rng).into_affine(),
                 G1Projective::rand(&mut rng).into_affine(),
@@ -593,23 +597,24 @@ mod tests {
                 G1Projective::rand(&mut rng).into_affine(),
                 G1Projective::rand(&mut rng).into_affine(),
                 G1Projective::rand(&mut rng).into_affine(),
+                G1Projective::rand(&mut rng).into_affine(),
             ],
         };
-        let mock_prepared_public_input1 = G1Projective::rand(&mut rng).into_affine();
-        let mock_prepared_public_input2 = G1Projective::rand(&mut rng).into_affine();
-        let mock_prepared_public_input3 = G1Projective::rand(&mut rng).into_affine();
+        let mock_prepared_public_input1 = G1Projective::rand(&mut rng);
+        let mock_prepared_public_input2 = G1Projective::rand(&mut rng);
+        let mock_prepared_public_input3 = G1Projective::rand(&mut rng);
         let mock_g16_pf1: Proof<F> = Proof::<F> {
-            a: mock_prepared_public_input1,
+            a: mock_prepared_public_input1.into_affine(),
             b: mock_g16_vk1.gamma_g2,
             c: mock_g16_vk1.alpha_g1,
         };
         let mock_g16_pf2: Proof<F> = Proof::<F> {
-            a: mock_prepared_public_input2,
+            a: mock_prepared_public_input2.into_affine(),
             b: mock_g16_vk2.gamma_g2,
             c: mock_g16_vk2.alpha_g1,
         };
         let mock_g16_pf3: Proof<F> = Proof::<F> {
-            a: mock_prepared_public_input3,
+            a: mock_prepared_public_input3.into_affine(),
             b: mock_g16_vk3.gamma_g2,
             c: mock_g16_vk3.alpha_g1,
         };
@@ -649,11 +654,16 @@ mod tests {
             beta_g2: mock_beta_g2,
             gamma_g2: G2Projective::rand(&mut rng).into_affine(),
             delta_g2: -mock_beta_g2,
-            gamma_abc_g1: vec![mock_w0, mock_w0, G1Projective::rand(&mut rng).into_affine()],
+            gamma_abc_g1: vec![
+                G1Projective::rand(&mut rng).into_affine(),
+                mock_w0,
+                mock_w0,
+                G1Projective::rand(&mut rng).into_affine()
+            ],
         };
-        let mock_prepared_public_input = G1Projective::rand(&mut rng).into_affine();
+        let mock_prepared_public_input = G1Projective::rand(&mut rng);
         let mock_g16_pf: Proof<F> = Proof::<F> {
-            a: mock_prepared_public_input,
+            a: mock_prepared_public_input.into_affine(),
             b: mock_g16_vk.gamma_g2,
             c: mock_g16_vk.alpha_g1,
         };
@@ -689,37 +699,52 @@ mod tests {
             beta_g2: mock_beta_g2_vk1,
             gamma_g2: G2Projective::rand(&mut rng).into_affine(),
             delta_g2: -mock_beta_g2_vk1,
-            gamma_abc_g1: vec![mock_w0, mock_w0, G1Projective::rand(&mut rng).into_affine()],
+            gamma_abc_g1: vec![
+                G1Projective::rand(&mut rng).into_affine(),
+                mock_w0,
+                mock_w0,
+                G1Projective::rand(&mut rng).into_affine()
+            ],
         };
         let mock_g16_vk2: VerifyingKey<F> = VerifyingKey::<F> {
             alpha_g1: G1Projective::rand(&mut rng).into_affine(),
             beta_g2: mock_beta_g2_vk2,
             gamma_g2: G2Projective::rand(&mut rng).into_affine(),
             delta_g2: -mock_beta_g2_vk2,
-            gamma_abc_g1: vec![mock_w0, mock_w0, G1Projective::rand(&mut rng).into_affine()],
+            gamma_abc_g1: vec![
+                G1Projective::rand(&mut rng).into_affine(),
+                mock_w0,
+                mock_w0,
+                G1Projective::rand(&mut rng).into_affine()
+            ],
         };
         let mock_g16_vk3: VerifyingKey<F> = VerifyingKey::<F> {
             alpha_g1: G1Projective::rand(&mut rng).into_affine(),
             beta_g2: mock_beta_g2_vk3,
             gamma_g2: G2Projective::rand(&mut rng).into_affine(),
             delta_g2: -mock_beta_g2_vk3,
-            gamma_abc_g1: vec![mock_w0, mock_w0, G1Projective::rand(&mut rng).into_affine()],
+            gamma_abc_g1: vec![
+                G1Projective::rand(&mut rng).into_affine(),
+                mock_w0,
+                mock_w0,
+                G1Projective::rand(&mut rng).into_affine()
+            ],
         };
-        let mock_prepared_public_input1 = G1Projective::rand(&mut rng).into_affine();
-        let mock_prepared_public_input2 = G1Projective::rand(&mut rng).into_affine();
-        let mock_prepared_public_input3 = G1Projective::rand(&mut rng).into_affine();
+        let mock_prepared_public_input1 = G1Projective::rand(&mut rng);
+        let mock_prepared_public_input2 = G1Projective::rand(&mut rng);
+        let mock_prepared_public_input3 = G1Projective::rand(&mut rng);
         let mock_g16_pf1: Proof<F> = Proof::<F> {
-            a: mock_prepared_public_input1,
+            a: mock_prepared_public_input1.into_affine(),
             b: mock_g16_vk1.gamma_g2,
             c: mock_g16_vk1.alpha_g1,
         };
         let mock_g16_pf2: Proof<F> = Proof::<F> {
-            a: mock_prepared_public_input2,
+            a: mock_prepared_public_input2.into_affine(),
             b: mock_g16_vk2.gamma_g2,
             c: mock_g16_vk2.alpha_g1,
         };
         let mock_g16_pf3: Proof<F> = Proof::<F> {
-            a: mock_prepared_public_input3,
+            a: mock_prepared_public_input3.into_affine(),
             b: mock_g16_vk3.gamma_g2,
             c: mock_g16_vk3.alpha_g1,
         };
