@@ -15,6 +15,7 @@ include = ["Cargo.toml", "src", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
 
 [dependencies]
 ark-bls12-381 = { version = "^0.3.0" }
+ark-crypto-primitives = { version = "0.3", features = [ "r1cs" ] }
 ark-ec = { version = "^0.3.0", default-features = false }
 ark-ff = { version = "^0.3.0", default-features = false }
 ark-groth16 = { version = "^0.3.0", default-features = false }
@@ -23,6 +24,9 @@ groth-sahai = { git = "https://github.com/jdwhite88/groth-sahai-rs", branch = "m
 
 [dev-dependencies]
 criterion = { version = "0.3", features = [ "html_reports" ] } # benchmarks
+rand = "0.8"
+ark-relations = "0.3"
+ark-r1cs-std = "0.3"
 
 [profile.release]
 debug = true
