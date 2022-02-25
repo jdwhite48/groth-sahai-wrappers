@@ -20,7 +20,10 @@ ark-ec = { version = "^0.3.0", default-features = false }
 ark-ff = { version = "^0.3.0", default-features = false }
 ark-groth16 = { version = "^0.3.0", default-features = false }
 ark-std = { version = "^0.3.0", default-features = false }
-groth-sahai = { git = "https://github.com/jdwhite88/groth-sahai-rs", branch = "main" }
+
+[dependencies.groth-sahai]
+git = "https://github.com/jdwhite88/groth-sahai-rs"
+rev = "efe94cd38f97a45a7807ab304f2643d058857d7d"
 
 [dev-dependencies]
 criterion = { version = "0.3", features = [ "html_reports" ] } # benchmarks
