@@ -4,8 +4,6 @@ extern crate groth_sahai_wrappers;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 
-use std::time::Duration;
-
 use ark_bls12_381::Bls12_381 as F;
 use ark_ec::{PairingEngine, ProjectiveCurve};
 use ark_ff::UniformRand;
@@ -36,18 +34,18 @@ fn bench_gs_over_groth16_one_prove(c: &mut Criterion) {
             G1Projective::rand(&mut rng).into_affine(),
         ],
     };
-    let mock_prepared_public_input = G1Projective::rand(&mut rng).into_affine();
+    let mock_prepared_public_input = G1Projective::rand(&mut rng);
     let mock_g16_pf: Proof<F> = Proof::<F> {
-        a: mock_prepared_public_input,
+        a: mock_prepared_public_input.into_affine(),
         b: mock_g16_vk.gamma_g2,
         c: mock_g16_vk.alpha_g1,
     };
     c.bench_function(
-        &format!("Prove satisfiability of 1 Groth16 verification equation using Groth-Sahai"),
+        "Prove satisfiability of 1 Groth16 verification equation using Groth-Sahai",
         |bench| {
             bench.iter(|| {
                 let _ = prove_canon_g16_equations(
-                    &vec![(&mock_g16_pf, &mock_g16_vk, &mock_prepared_public_input)],
+                    &[(&mock_g16_pf, &mock_g16_vk, &mock_prepared_public_input)],
                     &crs,
                     &mut rng,
                 );
@@ -73,24 +71,24 @@ fn bench_gs_over_groth16_one_verify(c: &mut Criterion) {
             G1Projective::rand(&mut rng).into_affine(),
         ],
     };
-    let mock_prepared_public_input = G1Projective::rand(&mut rng).into_affine();
+    let mock_prepared_public_input = G1Projective::rand(&mut rng);
     let mock_g16_pf: Proof<F> = Proof::<F> {
-        a: mock_prepared_public_input,
+        a: mock_prepared_public_input.into_affine(),
         b: mock_g16_vk.gamma_g2,
         c: mock_g16_vk.alpha_g1,
     };
     let (xcoms, ycoms, gs_proofs) = prove_canon_g16_equations(
-        &vec![(&mock_g16_pf, &mock_g16_vk, &mock_prepared_public_input)],
+        &[(&mock_g16_pf, &mock_g16_vk, &mock_prepared_public_input)],
         &crs,
         &mut rng,
     );
 
     c.bench_function(
-        &format!("Verify satisfiability of 1 Groth16 verification equation using Groth-Sahai"),
+        "Verify satisfiability of 1 Groth16 verification equation using Groth-Sahai",
         |bench| {
             bench.iter(|| {
                 let _ = verify_canon_g16_equations::<F>(
-                    &vec![(&mock_g16_vk, &mock_prepared_public_input)],
+                    &[(&mock_g16_vk, &mock_prepared_public_input)],
                     (&xcoms, &ycoms, &gs_proofs),
                     &crs,
                 );
@@ -140,31 +138,31 @@ fn bench_gs_over_groth16_three_prove(c: &mut Criterion) {
             G1Projective::rand(&mut rng).into_affine(),
         ],
     };
-    let mock_prepared_public_input1 = G1Projective::rand(&mut rng).into_affine();
-    let mock_prepared_public_input2 = G1Projective::rand(&mut rng).into_affine();
-    let mock_prepared_public_input3 = G1Projective::rand(&mut rng).into_affine();
+    let mock_prepared_public_input1 = G1Projective::rand(&mut rng);
+    let mock_prepared_public_input2 = G1Projective::rand(&mut rng);
+    let mock_prepared_public_input3 = G1Projective::rand(&mut rng);
     let mock_g16_pf1: Proof<F> = Proof::<F> {
-        a: mock_prepared_public_input1,
+        a: mock_prepared_public_input1.into_affine(),
         b: mock_g16_vk1.gamma_g2,
         c: mock_g16_vk1.alpha_g1,
     };
     let mock_g16_pf2: Proof<F> = Proof::<F> {
-        a: mock_prepared_public_input2,
+        a: mock_prepared_public_input2.into_affine(),
         b: mock_g16_vk2.gamma_g2,
         c: mock_g16_vk2.alpha_g1,
     };
     let mock_g16_pf3: Proof<F> = Proof::<F> {
-        a: mock_prepared_public_input3,
+        a: mock_prepared_public_input3.into_affine(),
         b: mock_g16_vk3.gamma_g2,
         c: mock_g16_vk3.alpha_g1,
     };
 
     c.bench_function(
-        &format!("Prove satisfiability of 3 Groth16 verification equations using Groth-Sahai"),
+        "Prove satisfiability of 3 Groth16 verification equations using Groth-Sahai",
         |bench| {
             bench.iter(|| {
                 let _ = prove_canon_g16_equations(
-                    &vec![
+                    &[
                         (&mock_g16_pf1, &mock_g16_vk1, &mock_prepared_public_input1),
                         (&mock_g16_pf2, &mock_g16_vk2, &mock_prepared_public_input2),
                         (&mock_g16_pf3, &mock_g16_vk3, &mock_prepared_public_input3),
@@ -218,26 +216,26 @@ fn bench_gs_over_groth16_three_verify(c: &mut Criterion) {
             G1Projective::rand(&mut rng).into_affine(),
         ],
     };
-    let mock_prepared_public_input1 = G1Projective::rand(&mut rng).into_affine();
-    let mock_prepared_public_input2 = G1Projective::rand(&mut rng).into_affine();
-    let mock_prepared_public_input3 = G1Projective::rand(&mut rng).into_affine();
+    let mock_prepared_public_input1 = G1Projective::rand(&mut rng);
+    let mock_prepared_public_input2 = G1Projective::rand(&mut rng);
+    let mock_prepared_public_input3 = G1Projective::rand(&mut rng);
     let mock_g16_pf1: Proof<F> = Proof::<F> {
-        a: mock_prepared_public_input1,
+        a: mock_prepared_public_input1.into_affine(),
         b: mock_g16_vk1.gamma_g2,
         c: mock_g16_vk1.alpha_g1,
     };
     let mock_g16_pf2: Proof<F> = Proof::<F> {
-        a: mock_prepared_public_input2,
+        a: mock_prepared_public_input2.into_affine(),
         b: mock_g16_vk2.gamma_g2,
         c: mock_g16_vk2.alpha_g1,
     };
     let mock_g16_pf3: Proof<F> = Proof::<F> {
-        a: mock_prepared_public_input3,
+        a: mock_prepared_public_input3.into_affine(),
         b: mock_g16_vk3.gamma_g2,
         c: mock_g16_vk3.alpha_g1,
     };
     let (xcoms, ycoms, gs_proofs) = prove_canon_g16_equations(
-        &vec![
+        &[
             (&mock_g16_pf1, &mock_g16_vk1, &mock_prepared_public_input1),
             (&mock_g16_pf2, &mock_g16_vk2, &mock_prepared_public_input2),
             (&mock_g16_pf3, &mock_g16_vk3, &mock_prepared_public_input3),
@@ -247,11 +245,11 @@ fn bench_gs_over_groth16_three_verify(c: &mut Criterion) {
     );
 
     c.bench_function(
-        &format!("Verify satisfiability of 3 Groth16 verification equations using Groth-Sahai"),
+        "Verify satisfiability of 3 Groth16 verification equations using Groth-Sahai",
         |bench| {
             bench.iter(|| {
                 let _ = verify_canon_g16_equations::<F>(
-                    &vec![
+                    &[
                         (&mock_g16_vk1, &mock_prepared_public_input1),
                         (&mock_g16_vk2, &mock_prepared_public_input2),
                         (&mock_g16_vk3, &mock_prepared_public_input3),
